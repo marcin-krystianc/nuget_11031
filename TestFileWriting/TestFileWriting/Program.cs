@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -13,10 +14,11 @@ namespace TestFileWriting
 {
     class Program
     {
-        private const int MAX_MMAP_SIZE = 10 * 1024 * 1024;
-        private static long WrittenBytes = 0;
-        private static long WrittenFiles = 0;
-        
+        // https://github.com/NuGet/NuGet.Client/blob/744e9ae2e60501709a48081694891722c33dc9b3/src/NuGet.Core/NuGet.Packaging/PackageExtraction/StreamExtensions.cs#L16
+        private const int MAX_MMAP_SIZE = 10 * 1024 * 1024; 
+        private static long WrittenBytes;
+        private static long WrittenFiles ;
+        private static ConcurrentQueue<string> FilesToRemove = new ();
         public class Options
         {
             [Option(Required = false, Default = false, HelpText = "Use memory mapped files")]
@@ -31,24 +33,45 @@ namespace TestFileWriting
             Log.Logger = new LoggerConfiguration()
                 .WriteTo.Console(theme: ConsoleTheme.None)
                 .CreateLogger();
-            
+
             Log.Information($"OSDescription:{System.Runtime.InteropServices.RuntimeInformation.OSDescription}, " +
                             $"OSArchitecture:{System.Runtime.InteropServices.RuntimeInformation.OSArchitecture}, " +
+#if !NETFRAMEWORK
                             $"RuntimeIdentifier:{System.Runtime.InteropServices.RuntimeInformation.RuntimeIdentifier}, " +
+#endif
                             $"ProcessArchitecture:{System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture}, " +
                             $"FrameworkDescription:{System.Runtime.InteropServices.RuntimeInformation.FrameworkDescription}, " +
                             $"Environment.ProcessorCount:{Environment.ProcessorCount}, " +
                             "");
 
-            await Parser.Default.ParseArguments<Options>(args).WithParsedAsync(async options =>
-            {
-                var tasks = new List<Task>();
-                tasks.Add(StatsTask());
-                if (options.MemoryMaps == true) tasks.Add(MapTask());
-                if (options.FileStreams == true) tasks.Add(StreamTask());
+            var ctSource = new CancellationTokenSource();
+            Console.CancelKeyPress += (sender, eventArgs) => ctSource.Cancel();
 
-                await await Task.WhenAny(tasks);
-            });
+            try
+            {
+                await Parser.Default.ParseArguments<Options>(args).WithParsedAsync(async options =>
+                {
+                    var tasks = new List<Task>();
+                    tasks.Add(KeyboardInputTask(ctSource));
+                    tasks.Add(StatsTask(ctSource.Token));
+                    if (options.MemoryMaps == true) tasks.Add(MapTask(ctSource.Token));
+                    if (options.FileStreams == true) tasks.Add(StreamTask(ctSource.Token));
+                    await await Task.WhenAny(tasks);
+                });
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine(e);
+                throw;
+            }
+            finally
+            {
+                Console.WriteLine("Cleaning up files.");
+                while (FilesToRemove.TryDequeue(out var fileToRemove))
+                {
+                    File.Delete(fileToRemove);
+                }
+            }
         }
         
         static string ToSize(long bytes)
@@ -68,7 +91,13 @@ namespace TestFileWriting
             return "0 Bytes";
         }
 
-        static async Task StatsTask()
+        static async Task KeyboardInputTask(CancellationTokenSource ctSource)
+        {
+            await Task.Run(() => Console.ReadLine());
+            ctSource.Cancel();
+        }
+
+        static async Task StatsTask(CancellationToken ct)
         {
             var swGlobal = Stopwatch.StartNew();
             var stats = new Queue<(long writtenBytes, long writtenFiles)>();
@@ -76,6 +105,9 @@ namespace TestFileWriting
             var writeRate = "N/A";
             while (true)
             {
+                if (ct.IsCancellationRequested)
+                    return;
+                
                 var sw = Stopwatch.StartNew();
                 var writtenBytes = Interlocked.Read(ref WrittenBytes);
                 var writtenFiles = Interlocked.Read(ref WrittenFiles);
@@ -109,17 +141,22 @@ namespace TestFileWriting
             }
         }
 
-        static async Task MapTask()
+        static async Task MapTask(CancellationToken ct)
         {
             Log.Information($"Starting MapTask()");
             await Task.Delay(TimeSpan.FromSeconds(1));
 
             var rnd = new Random();
             var bytes = new byte[MAX_MMAP_SIZE];
-            rnd.NextBytes(bytes); Directory.CreateDirectory(Path.Combine(Path.GetTempPath(), "FileWriting"));
-
+            rnd.NextBytes(bytes); 
+            var root = Path.Combine(Path.GetTempPath(), "FileWriting");
+            Directory.CreateDirectory(root);
+            
             while (true)
-            {  
+            {
+                if (ct.IsCancellationRequested)
+                    return;
+                
                 var tmpPath = Path.Combine(Path.GetTempPath(), "FileWriting", Path.GetRandomFileName());
 
                 var size = rnd.Next(MAX_MMAP_SIZE);
@@ -127,16 +164,19 @@ namespace TestFileWriting
                 using (var mmf = MemoryMappedFile.CreateFromFile(tmpPath, FileMode.OpenOrCreate, null, size))
                 {
                     // Create the memory-mapped file.
-                    await using MemoryMappedViewStream mmstream = mmf.CreateViewStream();
-                    ms.CopyTo(mmstream);
+                    using (MemoryMappedViewStream mmstream = mmf.CreateViewStream())
+                    {
+                        ms.CopyTo(mmstream);
+                    }
                 }
 
                 Interlocked.Add(ref WrittenBytes, size);
                 Interlocked.Increment(ref WrittenFiles);
+                FilesToRemove.Enqueue(tmpPath);
             }
         }
 
-        static async Task StreamTask()
+        static async Task StreamTask(CancellationToken ct)
         {
             Log.Information($"Starting StreamTask()");
             await Task.Delay(TimeSpan.FromSeconds(1));
@@ -144,12 +184,15 @@ namespace TestFileWriting
             var rnd = new Random();
             var bytes = new byte[MAX_MMAP_SIZE];
             rnd.NextBytes(bytes);
-            Directory.CreateDirectory(Path.Combine(Path.GetTempPath(), "FileWriting"));
+            var root = Path.Combine(Path.GetTempPath(), "FileWriting");
+            Directory.CreateDirectory(root);
             
             while (true)
             {
-                var tmpPath = Path.Combine(Path.GetTempPath(), "FileWriting", Path.GetRandomFileName());
+                if (ct.IsCancellationRequested)
+                    return;
 
+                var tmpPath = Path.Combine(root, Path.GetRandomFileName());
                 var size = rnd.Next(MAX_MMAP_SIZE);
                 using (var ms = new MemoryStream(bytes, 0, size))
                 using (var outputStream = new FileStream(tmpPath, FileMode.Create))
@@ -159,6 +202,7 @@ namespace TestFileWriting
 
                 Interlocked.Add(ref WrittenBytes, size);
                 Interlocked.Increment(ref WrittenFiles);
+                FilesToRemove.Enqueue(tmpPath);
             }
         }
     }
