@@ -2,7 +2,6 @@ FROM mcr.microsoft.com/dotnet/sdk:5.0 AS build-env
 WORKDIR /app
 
 COPY . ./
-RUN ls -al ./
 RUN dotnet publish -c Release -o out --self-contained true --runtime linux-x64 --framework net5.0
 
 #FROM ubuntu:focal
@@ -10,10 +9,5 @@ FROM mcr.microsoft.com/dotnet/sdk:5.0
 
 WORKDIR /app
 COPY --from=build-env /app/out .
-# COPY --from=build-env /app/Linux.x64.Release .
 RUN apt update && apt install htop
-ENV PATH="/root/.dotnet/tools:${PATH}"
-# RUN dotnet tool install --global dotnet-counters
-# RUN dotnet tool install --global dotnet-dump
-CMD ["bash"]
-
+ENTRYPOINT  ["dotnet", "TestFileWriting.dll"]
