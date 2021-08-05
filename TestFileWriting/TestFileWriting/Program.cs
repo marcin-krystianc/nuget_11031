@@ -61,12 +61,12 @@ namespace TestFileWriting
 
             var ctSource = new CancellationTokenSource();
             Console.CancelKeyPress += (sender, eventArgs) => ctSource.Cancel();
+            var tasks = new List<Task>();
 
             try
             {
                 await Parser.Default.ParseArguments<Options>(args).WithParsedAsync(async options =>
                 {
-                    var tasks = new List<Task>();
                     tasks.Add(KeyboardInputTask(ctSource));
 
                     if (options.MemoryMaps == true)
@@ -85,6 +85,7 @@ namespace TestFileWriting
             finally
             {
                 ctSource.Cancel();
+                await Task.WhenAll(tasks);
                 Console.WriteLine("Cleaning up files.");
                 var directoryInfo = new DirectoryInfo(TmpRoot);
                 foreach (var file in directoryInfo.EnumerateFiles())
