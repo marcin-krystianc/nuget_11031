@@ -68,14 +68,17 @@ namespace TestFileWriting
                 {
                     var tasks = new List<Task>();
                     tasks.Add(KeyboardInputTask(ctSource));
-                    tasks.Add(StatsTask(ctSource.Token));
+
                     if (options.MemoryMaps == true)
                         tasks.Add(MapTask(ctSource.Token, (int) options.MinSizeValue, (int) options.MaxSizeValue));
+
                     if (options.FileStreams == true)
                         tasks.Add(StreamTask(ctSource.Token, (int) options.MinSizeValue, (int) options.MaxSizeValue));
+
                     if (options.StopAfterValue != null)
                         tasks.Add(TimeoutTask(ctSource.Token, options.StopAfterValue.Value));
 
+                    tasks.Add(StatsTask(ctSource.Token));
                     await await Task.WhenAny(tasks);
                 });
             }
@@ -145,8 +148,6 @@ namespace TestFileWriting
 
         static async Task StatsTask(CancellationToken ct)
         {
-            await Task.Delay(TimeSpan.FromSeconds(1));
-
             var swGlobal = Stopwatch.StartNew();
             var stats = new Queue<(long writtenBytes, long writtenFiles)>();
             var filesRate = "N/A";
@@ -184,7 +185,7 @@ namespace TestFileWriting
                 var elapsed = sw.Elapsed;
                 if (elapsed < TimeSpan.FromSeconds(1))
                 {
-                    await Task.Delay(TimeSpan.FromSeconds(1) - elapsed);
+                    await Task.Delay(TimeSpan.FromSeconds(1) - elapsed, ct);
                 }
             }
         }
