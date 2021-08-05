@@ -85,7 +85,16 @@ namespace TestFileWriting
             finally
             {
                 ctSource.Cancel();
-                await Task.WhenAll(tasks);
+
+                try
+                {
+                    await Task.WhenAll(tasks);
+                }
+                catch (Exception)
+                {
+                    // ignored
+                }
+
                 Console.WriteLine("Cleaning up files.");
                 var directoryInfo = new DirectoryInfo(TmpRoot);
                 foreach (var file in directoryInfo.EnumerateFiles())
@@ -143,7 +152,9 @@ namespace TestFileWriting
 
         static async Task KeyboardInputTask(CancellationTokenSource ctSource)
         {
-            await Task.Run(() => Console.ReadLine());
+            var inputTask = Task.Run(() => Console.ReadLine());
+            var delayTask = Task.Delay(Timeout.Infinite, ctSource.Token);
+            await Task.WhenAny(new []{inputTask, delayTask});
             ctSource.Cancel();
         }
 
