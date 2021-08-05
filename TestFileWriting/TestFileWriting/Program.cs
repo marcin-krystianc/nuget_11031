@@ -17,7 +17,7 @@ namespace TestFileWriting
     {
         private static long WrittenBytes;
         private static long WrittenFiles;
-        private static ConcurrentQueue<string> FilesToRemove = new();
+        private static string TmpRoot = Path.Combine(Path.GetTempPath(), "FileWriting");
 
         public class Options
         {
@@ -27,15 +27,20 @@ namespace TestFileWriting
             [Option(Required = false, Default = false, HelpText = "Use file streams")]
             public bool? FileStreams { get; set; }
 
-            [Option(Required = false, Default = "1B", HelpText = "Minimum file size")]
+            [Option(Required = false, Default = "c1B", HelpText = "Minimum file size")]
             public string MinSize { get; set; }
 
             // https://github.com/NuGet/NuGet.Client/blob/744e9ae2e60501709a48081694891722c33dc9b3/src/NuGet.Core/NuGet.Packaging/PackageExtraction/StreamExtensions.cs#L16
             [Option(Required = false, Default = "10MB", HelpText = "Maximum file size")]
             public string MaxSize { get; set; }
 
+            [Option(Required = false, Default = null, HelpText = "Maximum time to run the test app")]
+            public long StopAfter { get; set; }
+
             internal long MinSizeValue => FromSize(MinSize);
             internal long MaxSizeValue => FromSize(MaxSize);
+
+            internal TimeSpan? StopAfterValue => StopAfter == 0 ? null : TimeSpan.FromSeconds(StopAfter);
         }
 
         static async Task Main(string[] args)
@@ -68,20 +73,20 @@ namespace TestFileWriting
                         tasks.Add(MapTask(ctSource.Token, (int) options.MinSizeValue, (int) options.MaxSizeValue));
                     if (options.FileStreams == true)
                         tasks.Add(StreamTask(ctSource.Token, (int) options.MinSizeValue, (int) options.MaxSizeValue));
+                    if (options.StopAfterValue != null)
+                        tasks.Add(TimeoutTask(ctSource.Token, options.StopAfterValue.Value));
+
                     await await Task.WhenAny(tasks);
                 });
             }
-            catch (Exception e)
-            {
-                Console.WriteLine(e);
-                throw;
-            }
             finally
             {
+                ctSource.Cancel();
                 Console.WriteLine("Cleaning up files.");
-                while (FilesToRemove.TryDequeue(out var fileToRemove))
+                var directoryInfo = new DirectoryInfo(TmpRoot);
+                foreach (var file in directoryInfo.EnumerateFiles())
                 {
-                    File.Delete(fileToRemove);
+                    file.Delete();
                 }
             }
         }
@@ -140,6 +145,8 @@ namespace TestFileWriting
 
         static async Task StatsTask(CancellationToken ct)
         {
+            await Task.Delay(TimeSpan.FromSeconds(1));
+
             var swGlobal = Stopwatch.StartNew();
             var stats = new Queue<(long writtenBytes, long writtenFiles)>();
             var filesRate = "N/A";
@@ -185,20 +192,20 @@ namespace TestFileWriting
         static async Task MapTask(CancellationToken ct, int minSize, int maxSize)
         {
             Log.Information($"Starting MapTask(minSize={ToSize(minSize)}, maxSize={ToSize(maxSize)})");
-            await Task.Delay(TimeSpan.FromSeconds(1));
+            await Task.Yield();
 
             var rnd = new Random();
             var bytes = new byte[maxSize];
             rnd.NextBytes(bytes);
-            var root = Path.Combine(Path.GetTempPath(), "FileWriting");
-            Directory.CreateDirectory(root);
+
+            Directory.CreateDirectory(TmpRoot);
 
             while (true)
             {
                 if (ct.IsCancellationRequested)
                     return;
 
-                var tmpPath = Path.Combine(Path.GetTempPath(), "FileWriting", Path.GetRandomFileName());
+                var tmpPath = Path.Combine(TmpRoot, Path.GetRandomFileName());
                 var size = rnd.Next(minSize, maxSize);
                 using (var ms = new MemoryStream(bytes, 0, size))
                 using (var mmf = MemoryMappedFile.CreateFromFile(tmpPath, FileMode.OpenOrCreate, null, size))
@@ -212,27 +219,32 @@ namespace TestFileWriting
 
                 Interlocked.Add(ref WrittenBytes, size);
                 Interlocked.Increment(ref WrittenFiles);
-                FilesToRemove.Enqueue(tmpPath);
             }
+        }
+
+        static async Task TimeoutTask(CancellationToken ct, TimeSpan timeout)
+        {
+            Log.Information($"Starting TimeoutTask(timeout={timeout})");
+
+            await Task.Delay(timeout, ct);
         }
 
         static async Task StreamTask(CancellationToken ct, int minSize, int maxSize)
         {
             Log.Information($"Starting StreamTask(minSize={ToSize(minSize)}, maxSize={ToSize(maxSize)})");
-            await Task.Delay(TimeSpan.FromSeconds(1));
+            await Task.Yield();
 
             var rnd = new Random();
             var bytes = new byte[maxSize];
             rnd.NextBytes(bytes);
-            var root = Path.Combine(Path.GetTempPath(), "FileWriting");
-            Directory.CreateDirectory(root);
+            Directory.CreateDirectory(TmpRoot);
 
             while (true)
             {
                 if (ct.IsCancellationRequested)
                     return;
 
-                var tmpPath = Path.Combine(root, Path.GetRandomFileName());
+                var tmpPath = Path.Combine(TmpRoot, Path.GetRandomFileName());
                 var size = rnd.Next(minSize, maxSize);
                 using (var ms = new MemoryStream(bytes, 0, size))
                 using (var outputStream = new FileStream(tmpPath, FileMode.Create))
@@ -242,7 +254,6 @@ namespace TestFileWriting
 
                 Interlocked.Add(ref WrittenBytes, size);
                 Interlocked.Increment(ref WrittenFiles);
-                FilesToRemove.Enqueue(tmpPath);
             }
         }
     }
